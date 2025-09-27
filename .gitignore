@@ -1,0 +1,16 @@
+# virtualenv & IDE
+.venv/
+.idea/
+
+# data & logs (big / local)
+data/
+logs/
+
+# caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS noise
+.DS_Store
+Thumbs.db
