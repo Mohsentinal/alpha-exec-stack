@@ -2,11 +2,12 @@
 from pathlib import Path
 import polars as pl
 from loguru import logger
+import os
 
 # ---- Config ----
-EXCHANGE = "binance"
-SYMBOL   = "BTCUSDT"          # UPPERCASE to match folder
-EVERY    = "100ms"            # resample grid
+EXCHANGE = os.getenv("EXCHANGE", "binance")
+SYMBOL   = os.getenv("SYMBOL", "BTCUSDT")
+EVERY    = os.getenv("RESAMPLE_MS", "200ms")            # resample grid
 H_1S, H_5S, H_30S = 5, 25, 150   # horizons in resampled steps for 100ms grid
 EPS = 1e-12
 

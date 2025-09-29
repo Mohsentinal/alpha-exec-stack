@@ -30,7 +30,7 @@ TAKER_FEE_BPS = 5.0
 
 # Gates / grids
 THRESH_GRID = [0.60, 0.65, 0.70]             # classifier probability
-EDGE_GRID   = [0.00, 0.01, 0.02]             # |micro_edge_bps| minimum
+EDGE_GRID = [0.00, 0.0005, 0.001]             # |micro_edge_bps| minimum
 FILL_USDT   = [25, 50, 100]                  # required same-side aggressive notional within FWD_SECS
 
 # Paths
