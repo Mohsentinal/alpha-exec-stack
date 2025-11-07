@@ -12,7 +12,7 @@ os.environ.setdefault("RESAMPLE_MS", "200")  # try "100" for faster grid
 os.environ.setdefault("FWD_SECS",    "2")    # maker fill horizon in seconds
 # -----------------------------------------------------------------
 
-DURATION_MIN = 30   # how long to collect data before training
+DURATION_MIN = 2   # how long to collect data before training
 PRINT_EVERY  = 60   # status print cadence (seconds)
 
 def spawn(script_relpath, log_name):
