@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run offline smoke test
+        env:
+          RESAMPLE_MS: 200ms
+          FWD_SECS: 2
+        run: |
+          python research/smoke_test.py
+      - name: Upload artifacts (results)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: results/**
+
+# setup.cfg
+[flake8]
+max-line-length = 120
+extend-ignore = E203, W503
