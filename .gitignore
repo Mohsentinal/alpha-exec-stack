@@ -4,3 +4,6 @@ results/
 __pycache__/
 .venv/
 *.parquet
+# IDE
+.idea/
+
