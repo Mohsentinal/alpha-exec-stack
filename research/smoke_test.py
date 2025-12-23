@@ -7,6 +7,7 @@ import numpy as np
 import polars as pl
 from loguru import logger
 
+
 # ---- tiny compat: works on both old (low/high) and new (start/end) Polars
 def dt_range(start_dt: dt.datetime, end_dt: dt.datetime, interval_ms: int) -> pl.Series:
     try:
@@ -28,6 +29,7 @@ def dt_range(start_dt: dt.datetime, end_dt: dt.datetime, interval_ms: int) -> pl
             time_unit="ms",
         )
 
+
 def make_synth(n: int = 2_000, dt_ms: int = 200) -> pl.DataFrame:
     """
     Build a tiny synthetic top-of-book stream suitable for quick pipeline checks.
@@ -37,7 +39,6 @@ def make_synth(n: int = 2_000, dt_ms: int = 200) -> pl.DataFrame:
     end = start + dt.timedelta(milliseconds=(n - 1) * dt_ms)
     ts = dt_range(start, end, dt_ms)
 
-    # simple random walk mid with small spread and qty noise
     rng = np.random.default_rng(42)
     mid = 100_000 + np.cumsum(rng.normal(0, 1.0, n))
     spread = np.clip(rng.normal(0.8, 0.1, n), 0.4, 1.6)
@@ -56,28 +57,41 @@ def make_synth(n: int = 2_000, dt_ms: int = 200) -> pl.DataFrame:
         }
     )
 
+
 def main():
     df = make_synth()
     logger.info(f"shape: {df.shape}")
     logger.info(df.head(5))
 
-    # Write a shard in the same partition layout your pipeline expects
+    # Write shards in the SAME partition layout the main pipeline expects:
+    # data/tob/exchange=.../symbol=.../date=YYYY-MM-DD/hour=HH/tob_0000.parquet
     base = Path(__file__).resolve().parents[1]
-    out_dir = (
+    date_str = "2099-01-01"
+    hour_str = "00"
+
+    out_dir_date = (
         base
         / "data"
         / "tob"
         / "exchange=binance"
         / "symbol=BTCUSDT"
-        / "date=2099-01-01"
+        / f"date={date_str}"
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir_hour = out_dir_date / f"hour={hour_str}"
 
-    out_file = out_dir / "tob.parquet"
-    # ✅ Polars requires a path/handle here (does not return bytes)
-    df.write_parquet(out_file)
+    out_dir_hour.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"→ wrote {out_file} | rows={df.height}")
+    # Primary (matches build_features_tob expected glob)
+    out_file_hour = out_dir_hour / "tob_0000.parquet"
+    df.write_parquet(out_file_hour)
+    logger.info(f"→ wrote {out_file_hour} | rows={df.height}")
+
+    # Optional convenience (flat file) — keeps backward compatibility
+    out_dir_date.mkdir(parents=True, exist_ok=True)
+    out_file_flat = out_dir_date / "tob.parquet"
+    df.write_parquet(out_file_flat)
+    logger.info(f"→ wrote {out_file_flat} | rows={df.height}")
+
 
 if __name__ == "__main__":
     main()
