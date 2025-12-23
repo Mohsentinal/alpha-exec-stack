@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 from pathlib import Path
 import os
+import re
+import glob
 import polars as pl
 from loguru import logger
 
@@ -7,41 +11,120 @@ from loguru import logger
 # CONFIG (env-driven)
 # -----------------------
 EXCHANGE = os.getenv("EXCHANGE", "binance")
-SYMBOL   = os.getenv("SYMBOL",   "BTCUSDT")
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+
+# Optional: choose which date to process
+# - DATE not set  -> auto-pick newest date=YYYY-MM-DD folder
+# - DATE=2099-01-01 -> only that date
+# - DATE=*        -> all dates (requires consistent parquet schema across all files)
+DATE = os.getenv("DATE", "").strip()
 
 # Resample step as a string Polars understands ("200ms", "100ms", etc.)
 RESAMPLE_MS = os.getenv("RESAMPLE_MS", "200ms").strip().lower()
 if RESAMPLE_MS.isdigit():
-    RESAMPLE_MS = f"{RESAMPLE_MS}ms"  # guard against plain "200" (needs unit)
+    RESAMPLE_MS = f"{RESAMPLE_MS}ms"
 EVERY = RESAMPLE_MS
 
 # Forward horizon (seconds)
-FWD_SECS  = int(os.getenv("FWD_SECS", "2"))
-MS_INT    = int(RESAMPLE_MS.replace("ms", ""))
-H_FWD     = max(1, (1000 // MS_INT) * FWD_SECS)  # number of resampled steps in FWD_SECS
+FWD_SECS = int(os.getenv("FWD_SECS", "2"))
+MS_INT = int(RESAMPLE_MS.replace("ms", ""))
+H_FWD = max(1, (1000 // MS_INT) * FWD_SECS)
 
 BASE = Path(__file__).resolve().parents[1]
-RAW_TOB_GLOB = str(
-    BASE / "data" / "tob" / f"exchange={EXCHANGE}" / f"symbol={SYMBOL}" / "date=*" / "hour=*" / "tob_*.parquet"
-)
+ROOT = BASE / "data" / "tob" / f"exchange={EXCHANGE}" / f"symbol={SYMBOL}"
+
 OUT_DIR = BASE / "data" / "features_tob" / f"exchange={EXCHANGE}" / f"symbol={SYMBOL}"
 
-logger.remove(); logger.add(lambda m: print(m, end=""))
+logger.remove()
+logger.add(lambda m: print(m, end=""))
+
+
+def _list_dates(root: Path) -> list[str]:
+    """Return list of available dates like ['2025-12-17', '2099-01-01', ...]."""
+    if not root.exists():
+        return []
+    dates = []
+    for p in root.glob("date=*"):
+        if p.is_dir():
+            m = re.match(r"date=(\d{4}-\d{2}-\d{2})$", p.name)
+            if m:
+                dates.append(m.group(1))
+    return sorted(set(dates))
+
+
+def _pick_default_date(root: Path) -> str | None:
+    dates = _list_dates(root)
+    return max(dates) if dates else None
+
+
+def _scan_parquet_compat(files: list[str]) -> pl.LazyFrame:
+    """
+    Newer Polars supports extra_columns='ignore' which helps when schemas differ slightly.
+    We'll try it, and fall back if not supported.
+    """
+    try:
+        return pl.scan_parquet(files, extra_columns="ignore")
+    except TypeError:
+        return pl.scan_parquet(files)
+
+
+def _resolve_input_files() -> tuple[list[str], str]:
+    """
+    Resolve parquet files to scan based on DATE policy.
+    Returns (files, chosen_date_string) where chosen_date_string can be '*' or 'YYYY-MM-DD'.
+    """
+    if DATE == "*":
+        date_sel = "*"
+    elif DATE:
+        date_sel = DATE
+    else:
+        # Auto-pick newest date folder to avoid scanning thousands of mixed-schema files
+        picked = _pick_default_date(ROOT)
+        if not picked:
+            raise FileNotFoundError(
+                f"No date partitions found under:\n  {ROOT}\n"
+                "Expected folders like date=YYYY-MM-DD.\n"
+                "Fix: run the ingestors or run `python -m research.smoke_test`."
+            )
+        date_sel = picked
+        logger.info(f"[build_features_tob] DATE not set → auto-selected latest date={date_sel}\n")
+
+    # Support BOTH layouts inside the chosen date(s):
+    # 1) partitioned: date=.../hour=.../tob_*.parquet
+    # 2) flat:        date=.../tob.parquet
+    patterns = [
+        str(ROOT / f"date={date_sel}" / "hour=*" / "tob_*.parquet"),
+        str(ROOT / f"date={date_sel}" / "tob.parquet"),
+    ]
+
+    files: list[str] = []
+    for pat in patterns:
+        files.extend(glob.glob(pat))
+    files = sorted(set(files))
+
+    if not files:
+        raise FileNotFoundError(
+            "No TOB parquet files found.\n"
+            f"Looked for:\n  - {patterns[0]}\n  - {patterns[1]}\n\n"
+            f"Root:\n  {ROOT}\n"
+        )
+
+    # If hour-sharded files exist, ignore flat tob.parquet to avoid double-counting
+    if any("\\hour=" in f or "/hour=" in f for f in files):
+        files = [f for f in files if ("\\hour=" in f or "/hour=" in f)]
+
+    return files, date_sel
 
 
 def _pick_time_column(schema_names_lower: dict) -> tuple[str, str] | None:
-    """
-    Return (original_col_name, unit_hint) where unit_hint is one of {"ms","ns","auto"}.
-    We search for many common timestamp field names.
-    """
     candidates = [
         ("ts", "auto"),
         ("ts_ms", "ms"),
-        ("ts_recv_ms", "ms"),        # ← your ingestor
+        ("ts_recv_ms", "ms"),
         ("timestamp_ms", "ms"),
         ("event_time_ms", "ms"),
         ("event_ms", "ms"),
-        ("e", "ms"),                 # Binance event time
+        ("e", "ms"),
         ("t", "ms"),
         ("time_ms", "ms"),
         ("event_time", "ms"),
@@ -59,11 +142,6 @@ def _pick_time_column(schema_names_lower: dict) -> tuple[str, str] | None:
 
 
 def _ensure_ts(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    Ensure we have a datetime 'ts' column.
-    Accepts many possible input names: ts, ts_ms, event_time_ms, ts_recv_ms, E, T, timestamp, etc.
-    Converts ints to epoch ms (or ns), and parses strings when needed.
-    """
     schema = lf.collect_schema()
     names = list(schema.keys())
     names_lower = {n.lower(): n for n in names}
@@ -71,8 +149,8 @@ def _ensure_ts(lf: pl.LazyFrame) -> pl.LazyFrame:
     picked = _pick_time_column(names_lower)
     if not picked:
         raise KeyError(
-            "Expected a time column (e.g., 'ts', 'ts_ms', 'ts_recv_ms', 'event_time_ms', 'E', 'T', "
-            f"'timestamp_ms', etc.). Found columns: {names}"
+            "Expected a time column (e.g., 'ts', 'ts_ms', 'ts_recv_ms', 'event_time_ms', etc.). "
+            f"Found columns: {names}"
         )
 
     src_name, unit_hint = picked
@@ -90,11 +168,10 @@ def _ensure_ts(lf: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def load_raw_lazy() -> pl.LazyFrame:
-    """
-    Load raw top-of-book snapshots written by the ingestor.
-    We alias common variants to: bid, ask, bid_qty, ask_qty.
-    """
-    lf = pl.scan_parquet(RAW_TOB_GLOB)
+    files, date_sel = _resolve_input_files()
+    logger.info(f"[load_raw_lazy] date={date_sel} | files={len(files)}\n")
+
+    lf = _scan_parquet_compat(files)
     lf = _ensure_ts(lf)
 
     schema = lf.collect_schema()
@@ -106,91 +183,79 @@ def load_raw_lazy() -> pl.LazyFrame:
                 return cols[c]
         return default
 
-    # Your column names included here:
     bid_col = pick("bid", "best_bid", "b", "bid_px")
     ask_col = pick("ask", "best_ask", "a", "ask_px")
-    bq_col  = pick("bid_qty", "bq", "bid_size", "best_bid_qty", "bidsz", "bid_sz")
-    aq_col  = pick("ask_qty", "aq", "ask_size", "best_ask_qty", "asksz", "ask_sz")
+    bq_col = pick("bid_qty", "bq", "bid_size", "best_bid_qty", "bidsz", "bid_sz")
+    aq_col = pick("ask_qty", "aq", "ask_size", "best_ask_qty", "asksz", "ask_sz")
 
     if bid_col is None or ask_col is None:
-        raise KeyError(f"Could not find bid/ask columns in raw TOB files. Found: {list(schema.keys())}")
+        raise KeyError(f"Could not find bid/ask columns. Found: {list(schema.keys())}")
 
     selects = [
         pl.col("ts"),
         pl.col(bid_col).cast(pl.Float64).alias("bid"),
         pl.col(ask_col).cast(pl.Float64).alias("ask"),
+        pl.col(bq_col).cast(pl.Float64).alias("bid_qty") if bq_col else pl.lit(0.0).cast(pl.Float64).alias("bid_qty"),
+        pl.col(aq_col).cast(pl.Float64).alias("ask_qty") if aq_col else pl.lit(0.0).cast(pl.Float64).alias("ask_qty"),
     ]
-    if bq_col:
-        selects.append(pl.col(bq_col).cast(pl.Float64).alias("bid_qty"))
-    else:
-        selects.append(pl.lit(0.0).cast(pl.Float64).alias("bid_qty"))
-    if aq_col:
-        selects.append(pl.col(aq_col).cast(pl.Float64).alias("ask_qty"))
-    else:
-        selects.append(pl.lit(0.0).cast(pl.Float64).alias("ask_qty"))
-
     return lf.select(selects)
 
 
 def resample_raw_lazy(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    Resample to a fixed grid (EVERY), taking last values in each bucket.
-    Then derive features on that SAME grid.
-
-    IMPORTANT: don't reference 'mid' inside the same with_columns where it's created.
-    """
     agg = (
-        lf.group_by_dynamic(index_column="ts", every=EVERY, period=EVERY, closed="right")
-          .agg([
-              pl.col("bid").last().alias("bid"),
-              pl.col("ask").last().alias("ask"),
-              pl.col("bid_qty").last().alias("bid_qty"),
-              pl.col("ask_qty").last().alias("ask_qty"),
-          ])
+        lf.group_by_dynamic(
+            index_column="ts",
+            every=EVERY,
+            period=EVERY,
+            closed="right",
+            label="right",  # avoids “previous day” labels at bucket edges
+        )
+        .agg(
+            [
+                pl.col("bid").last().alias("bid"),
+                pl.col("ask").last().alias("ask"),
+                pl.col("bid_qty").last().alias("bid_qty"),
+                pl.col("ask_qty").last().alias("ask_qty"),
+            ]
+        )
     )
 
-    # First, create 'mid'
+    agg = agg.with_columns(((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid"))
+
     agg = agg.with_columns(
-        ((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid")
+        [
+            (((pl.col("ask") - pl.col("bid")) / ((pl.col("ask") + pl.col("bid")) / 2.0)) * 1e4).alias("spread_bps"),
+            ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty") + 1e-9)).alias("imb"),
+            (
+                ((pl.col("ask") * pl.col("bid_qty")) + (pl.col("bid") * pl.col("ask_qty")))
+                / (pl.col("bid_qty") + pl.col("ask_qty") + 1e-9)
+            ).alias("microprice"),
+        ]
     )
-
-    # Then compute the other features (avoid referencing 'mid' before it exists)
-    agg = agg.with_columns([
-        # spread in bps of mid — computed without referencing 'mid' in the same call it was created
-        (((pl.col("ask") - pl.col("bid")) / ((pl.col("ask") + pl.col("bid")) / 2.0)) * 1e4).alias("spread_bps"),
-        # imbalance
-        ((pl.col("bid_qty") - pl.col("ask_qty")) / (pl.col("bid_qty") + pl.col("ask_qty") + 1e-9)).alias("imb"),
-        # microprice
-        (((pl.col("ask") * pl.col("bid_qty")) + (pl.col("bid") * pl.col("ask_qty")))
-         / (pl.col("bid_qty") + pl.col("ask_qty") + 1e-9)).alias("microprice"),
-    ])
     return agg
 
 
 def add_returns(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Add forward returns/labels for the configured horizon (FWD_SECS).
-    Names are ret_{FWD_SECS}s and dir_{FWD_SECS}s.
-    Also keep 1s legacy labels for compatibility.
-    """
     ret_col = f"ret_{FWD_SECS}s"
     dir_col = f"dir_{FWD_SECS}s"
 
-    df = df.with_columns(
-        (pl.col("mid").shift(-H_FWD) / pl.col("mid") - 1.0).alias(ret_col)
-    ).with_columns(
-        pl.when(pl.col(ret_col) > 0).then(pl.lit(1))
-         .when(pl.col(ret_col) < 0).then(pl.lit(-1))
-         .otherwise(pl.lit(0)).alias(dir_col)
+    df = df.with_columns((pl.col("mid").shift(-H_FWD) / pl.col("mid") - 1.0).alias(ret_col)).with_columns(
+        pl.when(pl.col(ret_col) > 0)
+        .then(pl.lit(1))
+        .when(pl.col(ret_col) < 0)
+        .then(pl.lit(-1))
+        .otherwise(pl.lit(0))
+        .alias(dir_col)
     )
 
     steps_1s = max(1, 1000 // MS_INT)
-    df = df.with_columns(
-        (pl.col("mid").shift(-steps_1s) / pl.col("mid") - 1.0).alias("ret_1s")
-    ).with_columns(
-        pl.when(pl.col("ret_1s") > 0).then(pl.lit(1))
-         .when(pl.col("ret_1s") < 0).then(pl.lit(-1))
-         .otherwise(pl.lit(0)).alias("dir_1s")
+    df = df.with_columns((pl.col("mid").shift(-steps_1s) / pl.col("mid") - 1.0).alias("ret_1s")).with_columns(
+        pl.when(pl.col("ret_1s") > 0)
+        .then(pl.lit(1))
+        .when(pl.col("ret_1s") < 0)
+        .then(pl.lit(-1))
+        .otherwise(pl.lit(0))
+        .alias("dir_1s")
     )
     return df
 
@@ -211,7 +276,7 @@ def write_by_date(df: pl.DataFrame) -> None:
 
 def main():
     logger.info(f"[build_features_tob] using EVERY='{EVERY}' (MS={MS_INT}) | FWD_SECS={FWD_SECS} | H_FWD={H_FWD}\n")
-    logger.info("Searching TOB under:\n  " + str(Path(RAW_TOB_GLOB).parent.parent.parent))
+    logger.info(f"Searching TOB under:\n  {ROOT}\n")
 
     lf_raw = load_raw_lazy()
     lf_resampled = resample_raw_lazy(lf_raw)
@@ -221,7 +286,6 @@ def main():
     df = add_date(df)
     write_by_date(df)
 
-    # quick head
     head_cols = ["ts", "mid", "spread_bps", "imb", "microprice", f"ret_{FWD_SECS}s"]
     print(df.select(head_cols).head(10))
 
