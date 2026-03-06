@@ -9,7 +9,6 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
 
@@ -22,10 +21,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run offline smoke test
+      - name: Run offline smoke test (full pipeline, fast grid)
         env:
-          RESAMPLE_MS: 200ms
-          FWD_SECS: "2"
+          RESAMPLE_MS: 200
+          FWD_SECS: 2
+          K_FOLDS: 2
+          THRESH_GRID: "0.60"
+          EDGE_GRID: "0.00"
+          FILL_USDT: "25"
         run: |
           python research/smoke_test.py
 
@@ -34,4 +37,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: results
-          path: results/**
+          path: |
+            results/**
+            logs/**
+          if-no-files-found: ignore

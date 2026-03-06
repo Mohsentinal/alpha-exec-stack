@@ -2,8 +2,13 @@ data/
 logs/
 results/
 __pycache__/
+.pytest_cache/
 .venv/
 *.parquet
+*.log
+.DS_Store
+
 # IDE
 .idea/
-
+.vscode/
+*.pyc
