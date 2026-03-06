@@ -2,11 +2,42 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 import numpy as np
 import polars as pl
 import pandas as pd
 from loguru import logger
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from sklearn.ensemble import HistGradientBoostingClassifier
+
+
+def _parse_grid(env_name: str, default: list[float]) -> list[float]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    vals: list[float] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        vals.append(float(part))
+    return vals if vals else default
+
+
+def _parse_int_grid(env_name: str, default: list[int]) -> list[int]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    vals: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        vals.append(int(float(part)))
+    return vals if vals else default
 
 # -----------------------
 # CONFIG
@@ -25,9 +56,11 @@ MAKER_FEE_BPS = float(os.getenv("MAKER_FEE_BPS", "1.0"))
 TAKER_FEE_BPS = float(os.getenv("TAKER_FEE_BPS", "5.0"))
 
 # Gates
-THRESH_GRID = [0.60, 0.65, 0.70]   # classifier confidence
-EDGE_GRID = [0.00, 0.01, 0.02]     # |micro_edge_bps| minimum
-FILL_USDT = [25, 50, 100]          # required opposite-side aggressor notional
+THRESH_GRID = _parse_grid("THRESH_GRID", [0.60, 0.65, 0.70])
+# classifier confidence
+EDGE_GRID = _parse_grid("EDGE_GRID", [0.00, 0.01, 0.02])  # |micro_edge_bps| minimum
+FILL_USDT = _parse_int_grid("FILL_USDT", [25, 50, 100])
+# required opposite-side aggressor notional
 
 # CV
 K_FOLDS = int(os.getenv("K_FOLDS", "5"))
@@ -263,7 +296,7 @@ def main():
                     print(
                         f"[thr={thr:.2f}, edge≥{ecut:.2f}bps, fill≥${fill_cut}] "
                         f"hit={m_hit:.3f} | trade_rate={m_tr:.3f} | "
-                        f"avg_gross_bps={m_g:.2f} | avg_net_bps={m_n:.2f}"
+                        f"avg_gross_bps={m_g:.2f} | avg_net_bps={m_n:.2f} | edge_per_bar={(m_n*m_tr):.3f}"
                     )
 
                     agg_rows.append(
@@ -276,6 +309,7 @@ def main():
                             trade_rate=m_tr,
                             avg_gross_bps=m_g,
                             avg_net_bps=m_n,
+                            edge_per_bar=m_n * m_tr,
                             resample=EVERY,
                             fwd_secs=FWD_SECS,
                         )
@@ -292,6 +326,14 @@ def main():
                 values="avg_net_bps",
                 title=f"Maker avg_net_bps (fill≥${fval}, RESAMPLE={EVERY}, FWD={FWD_SECS}s)",
                 name=f"maker_netbps_heatmap_fill{fval}",
+            )
+            _ = save_heatmap(
+                chunk,
+                index="thr",
+                columns="edge",
+                values="edge_per_bar",
+                title=f"Maker edge_per_bar = avg_net_bps * trade_rate (fill≥${fval}, RESAMPLE={EVERY}, FWD={FWD_SECS}s)",
+                name=f"maker_edgeperbar_heatmap_fill{fval}",
             )
         logger.info(f"[persist] wrote {csv_path}")
 

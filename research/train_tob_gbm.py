@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 import numpy as np
 import polars as pl
 import pandas as pd
 from loguru import logger
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 # -----------------------
@@ -23,9 +28,23 @@ FWD_SECS = int(os.getenv("FWD_SECS", "2"))
 # taker costs: fee + 0.5 * spread
 TAKER_FEE_BPS = float(os.getenv("TAKER_FEE_BPS", "5.0"))
 
+
+def _parse_grid(env_name: str, default: list[float]) -> list[float]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    vals = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        vals.append(float(part))
+    return vals if vals else default
+
 # classifier gates
-THRESH_GRID = [0.60, 0.65, 0.70]
-EDGE_GRID = [0.00, 0.05, 0.10]  # micro_edge gate in bps
+THRESH_GRID = _parse_grid("THRESH_GRID", [0.60, 0.65, 0.70])
+EDGE_GRID = _parse_grid("EDGE_GRID", [0.00, 0.05, 0.10])  # micro_edge gate in bps
+
 
 # CV
 K_FOLDS = int(os.getenv("K_FOLDS", "5"))
@@ -213,7 +232,7 @@ def main():
                 print(
                     f"[thr={thr:.2f}, edge≥{ecut:.2f}bps] "
                     f"hit={m_hit:.3f} | trade_rate={m_tr:.3f} | "
-                    f"avg_gross_bps={m_g:.2f} | avg_net_bps={m_n:.2f}"
+                    f"avg_gross_bps={m_g:.2f} | avg_net_bps={m_n:.2f} | edge_per_bar={(m_n*m_tr):.3f}"
                 )
 
                 agg_rows.append(
@@ -225,6 +244,7 @@ def main():
                         trade_rate=m_tr,
                         avg_gross_bps=m_g,
                         avg_net_bps=m_n,
+                        edge_per_bar=m_n * m_tr,
                         resample=EVERY,
                         fwd_secs=FWD_SECS,
                     )
@@ -240,6 +260,14 @@ def main():
             values="avg_net_bps",
             title=f"Taker avg_net_bps (RESAMPLE={EVERY}, FWD={FWD_SECS}s)",
             name="taker_netbps_heatmap",
+        )
+        _ = save_heatmap(
+            dfm,
+            index="thr",
+            columns="edge",
+            values="edge_per_bar",
+            title=f"Taker edge_per_bar = avg_net_bps * trade_rate (RESAMPLE={EVERY}, FWD={FWD_SECS}s)",
+            name="taker_edgeperbar_heatmap",
         )
         logger.info(f"[persist] wrote {csv_path}")
 

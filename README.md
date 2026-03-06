@@ -74,7 +74,9 @@ This is meant to be a clean “starter stack” I can extend into deeper executi
 
 ---
 
-## Quick start
+## Quick start (offline, no Binance needed)
+
+This verifies the repo end-to-end using **synthetic data**, and writes outputs to `./results/`.
 
 ```bash
 python -m venv .venv
@@ -84,3 +86,82 @@ python -m venv .venv
 #   source .venv/bin/activate
 
 pip install -r requirements.txt
+
+python research/smoke_test.py
+```
+
+You should see:
+- `results/metrics/taker_grid_latest.csv`
+- `results/metrics/maker_grid_latest.csv`
+- some heatmaps under `results/plots/`
+
+---
+
+## Quick start (live data)
+
+This collects live data from Binance websockets, then builds features and runs both evaluations.
+
+```bash
+python -m venv .venv
+# Windows:
+#   .\.venv\Scripts\Activate.ps1
+# macOS/Linux:
+#   source .venv/bin/activate
+
+pip install -r requirements.txt
+
+python run_pipeline.py
+```
+
+By default `run_pipeline.py`:
+- runs both ingestors for **30 minutes**
+- builds features
+- runs taker + maker evaluations
+
+---
+
+## Configuration knobs (env vars)
+
+You can override these without editing code:
+
+- `RESAMPLE_MS` (default: `200`)  
+  Feature grid in milliseconds (`100`, `200`, etc.)
+- `FWD_SECS` (default: `2`)  
+  Forward horizon for labels and maker fill proxy.
+- `DURATION_MIN` (default: `30`)  
+  How long `run_pipeline.py` collects live data.
+- `K_FOLDS` (default: `5`)  
+  Purged CV folds in both trainers.
+
+For **fast smoke runs / CI**, you can also set smaller grids:
+- `THRESH_GRID="0.60,0.65"`  
+- `EDGE_GRID="0.00,0.05"`  
+- `FILL_USDT="25,50"`
+
+---
+
+## Metrics note (how to read results)
+
+The grid CSVs include:
+- `avg_net_bps` (net edge per trade in bps, after fees/spread assumptions)
+- `trade_rate` (fraction of samples where you would trade)
+- `edge_per_bar = avg_net_bps * trade_rate`
+
+`edge_per_bar` is the most “honest” way to compare settings when trade frequency changes.
+
+In the **offline smoke test**, the data is synthetic (random-ish), so you should **expect avg_net_bps to be negative** once fees/spread are applied. Passing the smoke test means the **pipeline + metrics + persistence** work end-to-end.
+
+---
+
+## Outputs
+
+- Raw data: `data/`
+- Logs: `logs/`
+- Metrics CSVs: `results/metrics/`
+- Heatmaps: `results/plots/`
+
+---
+
+## Disclaimer
+
+This is a learning / portfolio project, not trading advice.
